@@ -2,7 +2,13 @@ from uuid import uuid4
 
 from .audit import AuditTrail
 from .domain import ConflictError, NotFoundError
-from .rules import RuleEngine
+from .rules import (
+    RuleEngine,
+    qc_deviation_detail,
+    qc_failure_patch,
+    qc_pass_patch,
+    qc_retest_patch,
+)
 
 
 class DomainService:
@@ -30,12 +36,51 @@ class DomainService:
         entity_id = str(payload.pop("id", "") or uuid4())
         if self.repository.get_entity(entity_id):
             raise ConflictError("entity already exists: " + entity_id)
-        status = self.rules.initial_status(kind)
+        status = self.rules.initial_status(kind, payload)
         entity = self.repository.create_entity(entity_id, kind, status, payload, actor.user_id)
         self.audit.record(entity_id, actor, "create", None, status, {"kind": kind})
         if idempotency_key:
             self.repository.save_idempotency(actor.user_id, idempotency_key, entity_id)
+        if kind == "qc_check":
+            self._apply_qc_to_batch(actor, entity)
         return entity
+
+    def _apply_qc_to_batch(self, actor, qc):
+        batch = self.repository.get_entity(qc["data"].get("batch_id"))
+        if not batch:
+            return
+        if batch["status"] == "open":
+            if qc["status"] == "failed":
+                patch = qc_failure_patch(batch["data"], qc)
+                merged = dict(batch["data"])
+                merged.update(patch)
+                updated = self.repository.update_entity(batch["id"], None, "suspended", merged)
+                self.audit.record(batch["id"], actor, "suspend", "open", "suspended", {"qc_check_id": qc["id"], "patch": patch})
+                self._return_pending_results(actor, updated, qc)
+            else:
+                patch = qc_pass_patch(batch["data"], qc)
+                merged = dict(batch["data"])
+                merged.update(patch)
+                self.repository.update_entity(batch["id"], None, "open", merged)
+                self.audit.record(batch["id"], actor, "qc_pass", "open", "open", {"qc_check_id": qc["id"], "patch": patch})
+        elif batch["status"] == "suspended":
+            patch = qc_retest_patch(batch["data"], qc)
+            merged = dict(batch["data"])
+            merged.update(patch)
+            self.repository.update_entity(batch["id"], None, "suspended", merged)
+            action = "retest_pass" if qc["status"] == "passed" else "retest_fail"
+            self.audit.record(batch["id"], actor, action, "suspended", "suspended", {"qc_check_id": qc["id"], "patch": patch})
+
+    def _return_pending_results(self, actor, batch, qc):
+        detail = qc_deviation_detail(qc)
+        for result in self.repository.find_entities("result", "batch_id", batch["id"]):
+            if result["status"] != "pending":
+                continue
+            patch = {"block_reason": "qc_limit_exceeded", "qc_deviation": detail}
+            merged = dict(result["data"])
+            merged.update(patch)
+            self.repository.update_entity(result["id"], None, "blocked", merged)
+            self.audit.record(result["id"], actor, "block", "pending", "blocked", {"qc_check_id": qc["id"], "patch": patch})
 
     def transition(self, actor, entity_id, action, data=None, expected_version=None):
         entity = self.repository.get_entity(entity_id)

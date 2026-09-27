@@ -3,32 +3,138 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>实验室仪器校准与方法验证</title>
+  <title>检测批次质控与放行</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
-    pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+    main { max-width: 960px; margin: auto; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0 1.5rem; font-size: .9rem; }
+    th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; }
+    th { background: #f9fafb; }
+    tbody tr[data-batch] { cursor: pointer; }
+    tbody tr[data-batch]:hover { background: #f8fafc; }
+    tr.selected { background: #eff6ff; }
+    .tag { padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; white-space: nowrap; }
+    .tag.open, .tag.passed, .tag.released { background: #dcfce7; color: #166534; }
+    .tag.suspended, .tag.failed, .tag.blocked { background: #fee2e2; color: #991b1b; }
+    .tag.pending { background: #fef9c3; color: #854d0e; }
     button { padding: .5rem .8rem; cursor: pointer; }
+    .muted { color: #6b7280; }
   </style>
 </head>
 <body>
 <main>
-  <h1>实验室仪器校准与方法验证</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
-  <pre id="result">等待操作</pre>
-  <h2>常用接口</h2>
-  <pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+  <h1>检测批次质控与放行</h1>
+  <p class="muted">放行接到检测批次：建批登记仪器、方法与批次号；质控超限即停用批次并退回待放行结果，重测由另一名执行人连续两次合格并复核后恢复。</p>
+  <p><button onclick="loadAll()">刷新</button> <span id="health" class="muted"></span></p>
+
+  <h2>批次准入状态</h2>
+  <table id="batches">
+    <thead><tr><th>批次号</th><th>仪器</th><th>方法</th><th>准入状态</th><th>最近质控</th><th>重测连续合格</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>质控历史<span id="qc-batch"></span></h2>
+  <table id="qcs">
+    <thead><tr><th>时间</th><th>执行人</th><th>标准值</th><th>实测值</th><th>允许偏差</th><th>偏差</th><th>结论</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>检测结果<span id="result-batch"></span></h2>
+  <table id="results">
+    <thead><tr><th>样品</th><th>数值</th><th>状态</th><th>退回原因 / 偏差</th></tr></thead>
+    <tbody></tbody>
+  </table>
 </main>
 <script>
-async function checkHealth() {
-  const response = await fetch('/health');
-  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+const state = { batches: [], qcs: [], results: [], instruments: {}, methods: {}, selected: null };
+const LABELS = { open: "可放行", suspended: "已停用", passed: "合格", failed: "超限", pending: "待放行", blocked: "已退回", released: "已放行" };
+
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
+function fmt(value) {
+  return typeof value === "number" ? String(+value.toFixed(4)) : esc(value);
+}
+function tag(status) {
+  return '<span class="tag ' + esc(status) + '">' + esc(LABELS[status] || status) + "</span>";
+}
+function nameOf(map, id) {
+  const item = map[id];
+  return item ? esc(item.data.name || item.id) : esc(id || "");
+}
+
+async function loadAll() {
+  const [health, batches, qcs, results, instruments, methods] = await Promise.all([
+    fetch("/health").then(r => r.json()),
+    fetch("/api/batches").then(r => r.json()),
+    fetch("/api/qc_checks").then(r => r.json()),
+    fetch("/api/results").then(r => r.json()),
+    fetch("/api/instruments").then(r => r.json()),
+    fetch("/api/methods").then(r => r.json()),
+  ]);
+  document.getElementById("health").textContent = "服务状态：" + health.status;
+  state.batches = batches.items;
+  state.qcs = qcs.items;
+  state.results = results.items;
+  state.instruments = Object.fromEntries(instruments.items.map(i => [i.id, i]));
+  state.methods = Object.fromEntries(methods.items.map(i => [i.id, i]));
+  if (!state.selected && state.batches.length) state.selected = state.batches[0].id;
+  renderBatches();
+  renderDetails();
+}
+
+function renderBatches() {
+  const tbody = document.querySelector("#batches tbody");
+  tbody.innerHTML = state.batches.map(batch => {
+    const d = batch.data;
+    const last = d.last_qc;
+    const lastQc = last
+      ? tag(last.status) + " " + esc(last.operator || "") + " " + esc(last.checked_at || "")
+      : '<span class="muted">暂无</span>';
+    const retest = batch.status === "suspended" ? ((d.retest_passes || 0) + " / 2") : "—";
+    return '<tr data-batch="' + esc(batch.id) + '" class="' + (state.selected === batch.id ? "selected" : "") + '">'
+      + "<td>" + esc(d.batch_no) + "</td>"
+      + "<td>" + nameOf(state.instruments, d.instrument_id) + "</td>"
+      + "<td>" + nameOf(state.methods, d.method_id) + "</td>"
+      + "<td>" + tag(batch.status) + "</td>"
+      + "<td>" + lastQc + "</td>"
+      + "<td>" + retest + "</td>"
+      + "</tr>";
+  }).join("") || '<tr><td colspan="6" class="muted">暂无批次</td></tr>';
+  tbody.querySelectorAll("tr[data-batch]").forEach(row => {
+    row.addEventListener("click", () => { state.selected = row.dataset.batch; renderBatches(); renderDetails(); });
+  });
+}
+
+function renderDetails() {
+  const batch = state.batches.find(b => b.id === state.selected);
+  const label = batch ? "（批次 " + batch.data.batch_no + "）" : "";
+  document.getElementById("qc-batch").textContent = label;
+  document.getElementById("result-batch").textContent = label;
+
+  const qcs = state.qcs.filter(q => batch && q.data.batch_id === batch.id);
+  document.querySelector("#qcs tbody").innerHTML = qcs.map(q => {
+    const d = q.data;
+    return "<tr><td>" + esc(d.checked_at) + "</td><td>" + esc(d.operator) + "</td><td>" + fmt(d.standard_value)
+      + "</td><td>" + fmt(d.measured_value) + "</td><td>" + fmt(d.allowed_deviation) + "</td><td>" + fmt(d.deviation)
+      + "</td><td>" + tag(q.status) + "</td></tr>";
+  }).join("") || '<tr><td colspan="7" class="muted">暂无质控记录</td></tr>';
+
+  const results = state.results.filter(r => batch && r.data.batch_id === batch.id);
+  document.querySelector("#results tbody").innerHTML = results.map(r => {
+    const d = r.data;
+    let reason = "";
+    if (d.qc_deviation) {
+      const dev = d.qc_deviation;
+      reason = "质控超限退回：偏差 " + fmt(dev.deviation) + "（实测 " + fmt(dev.measured_value)
+        + " / 标准 " + fmt(dev.standard_value) + "，允许 ±" + fmt(dev.allowed_deviation) + "）";
+    }
+    return "<tr><td>" + esc(d.sample_id) + "</td><td>" + fmt(d.value) + " " + esc(d.unit || "")
+      + "</td><td>" + tag(r.status) + "</td><td>" + reason + "</td></tr>";
+  }).join("") || '<tr><td colspan="4" class="muted">暂无检测结果</td></tr>';
+}
+
+loadAll().catch(err => { document.getElementById("health").textContent = "加载失败：" + err; });
 </script>
 </body>
 </html>
