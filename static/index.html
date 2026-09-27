@@ -3,32 +3,382 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>实验室仪器校准与方法验证</title>
+  <title>检测批次质控与放行管理</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
-    pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    button { padding: .5rem .8rem; cursor: pointer; }
+    :root { --line:#e5e7eb; --muted:#6b7280; --ok:#065f46; --okbg:#d1fae5; --bad:#991b1b; --badbg:#fee2e2; --warn:#92400e; --warnbg:#fef3c7; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #1f2937; background: #f9fafb; }
+    main { max-width: 1080px; margin: auto; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+    .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1rem; }
+    .bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: .75rem 1rem; margin-bottom: 1rem; }
+    select, input, button { font: inherit; padding: .4rem .55rem; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
+    button { cursor: pointer; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: .83rem; }
+    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #f3f4f6; font-weight: 600; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    .tag { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; font-weight: 600; white-space: nowrap; }
+    .tag.active, .tag.passed, .tag.released, .tag.approved, .tag.validated { background: var(--okbg); color: var(--ok); }
+    .tag.suspended, .tag.failed, .tag.blocked, .tag.quarantined, .tag.revoked { background: var(--badbg); color: var(--bad); }
+    .tag.returned, .tag.pending, .tag.calibrating { background: var(--warnbg); color: var(--warn); }
+    .tag.registered, .tag.requested, .tag.draft { background: #e0e7ff; color: #3730a3; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem; }
+    .card h3 { margin: 0 0 .6rem; font-size: .95rem; }
+    label { display: block; font-size: .78rem; color: var(--muted); margin: .45rem 0 .15rem; }
+    label input, label select { width: 100%; margin-top: .1rem; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+    #toast { position: fixed; right: 1rem; bottom: 1rem; max-width: 420px; }
+    .toast-item { background: #111827; color: #fff; padding: .6rem .9rem; border-radius: 8px; margin-top: .5rem; font-size: .83rem; white-space: pre-wrap; }
+    .toast-item.err { background: var(--bad); }
+    .muted { color: var(--muted); font-size: .78rem; }
+    .mono { font-family: ui-monospace, Menlo, monospace; }
+    .dev { font-weight: 700; }
+    .dev.bad { color: var(--bad); }
+    .dev.good { color: var(--ok); }
+    .actions button { margin: 0 .25rem .25rem 0; }
   </style>
 </head>
 <body>
 <main>
-  <h1>实验室仪器校准与方法验证</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
-  <pre id="result">等待操作</pre>
-  <h2>常用接口</h2>
-  <pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+  <h1>检测批次质控与放行管理</h1>
+  <div class="sub">放行挂到检测批次：批次停用后，待放行结果自动退回并列明偏差；换人连续两次复测合格并经复核后批次恢复，原结果可按原记录重新放行。</div>
+
+  <div class="bar">
+    <strong>当前身份</strong>
+    <select id="role">
+      <option value="analyst">分析员 analyst</option>
+      <option value="authorizer">授权/复核人 authorizer</option>
+      <option value="metrology">计量 metrology</option>
+      <option value="technician">技术员 technician</option>
+      <option value="admin" selected>管理员 admin</option>
+      <option value="viewer">查看者 viewer</option>
+    </select>
+    <input id="userId" value="admin" size="12" placeholder="用户ID">
+    <span class="muted">登记质控时执行人必须等于当前用户ID；复核人不得与复测执行人相同</span>
+    <span style="flex:1"></span>
+    <button onclick="loadAll()">刷新</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>建批次（登记仪器、方法、批次号）</h3>
+      <label>批次号<input id="bNo" placeholder="如 B-2026-0927-01"></label>
+      <div class="row2">
+        <label>仪器<select id="bInst"></select></label>
+        <label>方法<select id="bMethod"></select></label>
+      </div>
+      <p><button class="primary" onclick="createBatch()">建立批次</button></p>
+      <p class="muted">同一仪器上批次号不可重复；仪器须在校准有效期内、方法须已验证且覆盖该仪器。</p>
+    </div>
+    <div class="card">
+      <h3>登记质控（标准值/实测值/允许偏差/执行人/时间）</h3>
+      <label>批次<select id="qBatch"></select></label>
+      <div class="row2">
+        <label>标准值<input id="qStd" type="number" step="any"></label>
+        <label>实测值<input id="qMeas" type="number" step="any"></label>
+      </div>
+      <div class="row2">
+        <label>允许偏差(±)<input id="qTol" type="number" step="any" value="0.1"></label>
+        <label>质控类型<select id="qType"><option value="routine">例行质控</option><option value="retest">停用后复测</option></select></label>
+      </div>
+      <div class="row2">
+        <label>执行人<input id="qBy"></label>
+        <label>执行时间<input id="qAt" type="datetime-local" step="1"></label>
+      </div>
+      <p><button class="primary" onclick="createQc()">登记质控</button>
+         <span id="qcHint" class="muted"></span></p>
+    </div>
+  </div>
+
+  <h2>检测批次与准入状态</h2>
+  <table id="batchTable">
+    <thead><tr><th>批次号</th><th>仪器 / 方法</th><th>准入状态</th><th>超限信息与偏差</th><th>恢复信息</th><th>操作</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>质控历史</h2>
+  <table id="qcTable">
+    <thead><tr><th>时间</th><th>批次</th><th>类型</th><th>标准值</th><th>实测值</th><th>允许偏差</th><th>偏差</th><th>判定</th><th>执行人</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>检测结果与放行</h2>
+  <div class="bar">
+    <select id="rBatch"></select>
+    <input id="rSample" placeholder="样品编号" size="14">
+    <input id="rMeas" placeholder="测量描述" size="14">
+    <input id="rValue" placeholder="结果值" size="10" type="number" step="any">
+    <input id="rUnit" placeholder="单位" size="8" value="mg/L">
+    <button class="primary" onclick="createResult()">登记结果</button>
+    <span class="muted">仅在批次准入(active)时可登记/放行；退回后的结果在批次恢复后按原记录重新放行。</span>
+  </div>
+  <table id="resultTable">
+    <thead><tr><th>样品</th><th>批次</th><th>结果</th><th>状态</th><th>退回原因 / 偏差</th><th>操作</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>审计时间线</h2>
+  <table id="auditTable">
+    <thead><tr><th>时间</th><th>对象</th><th>操作人</th><th>动作</th><th>状态变化</th><th>详情</th></tr></thead>
+    <tbody></tbody>
+  </table>
 </main>
+<div id="toast"></div>
+
 <script>
-async function checkHealth() {
-  const response = await fetch('/health');
-  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+const state = { instruments: [], methods: [], batches: [], qcs: [], results: [] };
+
+function headers() {
+  return {
+    "Content-Type": "application/json",
+    "X-User-Id": document.getElementById("userId").value || "anonymous",
+    "X-Role": document.getElementById("role").value,
+  };
 }
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const body = await res.json();
+  if (!res.ok) throw new bodyErr(body);
+  return body;
+}
+function bodyErr(body) { this.name = body.type || "Error"; this.message = body.error || JSON.stringify(body); }
+bodyErr.prototype = Object.create(Error.prototype);
+
+function toast(msg, isErr) {
+  const box = document.getElementById("toast");
+  const item = document.createElement("div");
+  item.className = "toast-item" + (isErr ? " err" : "");
+  item.textContent = msg;
+  box.appendChild(item);
+  setTimeout(() => item.remove(), 6000);
+}
+
+async function call(path, method, payload) {
+  try {
+    return await api(path, { method, headers: headers(), body: JSON.stringify(payload || {}) });
+  } catch (e) {
+    toast("✗ " + e.message, true);
+    throw e;
+  }
+}
+
+function tag(status) { return `<span class="tag ${status}">${status}</span>`; }
+function esc(v) { return String(v ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function instName(id) { const x = state.instruments.find(i => i.id === id); return x ? `${esc(x.data.name)} / ${esc(x.data.serial)}` : esc(id); }
+function methodName(id) { const x = state.methods.find(m => m.id === id); return x ? `${esc(x.data.name)} ${esc(x.data.version)}` : esc(id); }
+function batchNo(id) { const x = state.batches.find(b => b.id === id); return x ? esc(x.data.batch_no) : esc(id); }
+function fmtNum(v) { return v === null || v === undefined || v === "" ? "" : Number(v).toString(); }
+
+function fillSelect(id, items, labelFn, keep) {
+  const sel = document.getElementById(id);
+  const prev = keep === false ? null : sel.value;
+  sel.innerHTML = items.map((it, i) => `<option value="${esc(it.id)}">${labelFn(it, i)}</option>`).join("");
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+async function loadAll() {
+  document.getElementById("qBy").placeholder = document.getElementById("userId").value;
+  const [instruments, methods, batches, qcs, results, audit] = await Promise.all([
+    api("/api/instruments"), api("/api/methods"),
+    api("/api/batches"), api("/api/qc_checks"),
+    api("/api/results"), api("/api/audit"),
+  ]);
+  state.instruments = instruments.items;
+  state.methods = methods.items;
+  state.batches = batches.items;
+  state.qcs = qcs.items;
+  state.results = results.items;
+
+  fillSelect("bInst", instruments.items, i => `${i.data.name} / ${i.data.serial} (${i.status})`);
+  fillSelect("bMethod", methods.items, m => `${m.data.name} ${m.data.version} (${m.status})`);
+  fillSelect("qBatch", batches.items, b => `${b.data.batch_no} · ${tag(b.status)}`);
+  fillSelect("rBatch", batches.items, b => `${b.data.batch_no} · ${b.status}`);
+
+  const activeBatches = batches.items.filter(b => b.status === "active");
+  if (activeBatches.length) {
+    const sel = document.getElementById("rBatch");
+    if (!sel.value || !activeBatches.some(b => b.id === sel.value)) sel.value = activeBatches[0].id;
+  }
+  renderBatches();
+  renderQcs();
+  renderResults();
+  renderAudit(audit.items);
+}
+
+function renderBatches() {
+  const tbody = document.querySelector("#batchTable tbody");
+  tbody.innerHTML = state.batches.map(b => {
+    const failure = b.data.failed_qc_id
+      ? `质控 <span class="mono">${esc(b.data.failed_qc_id.slice(0, 8))}</span><br>
+         标准 ${fmtNum(b.data.standard_value)} / 实测 ${fmtNum(b.data.measured_value)}<br>
+         允许 ±${fmtNum(b.data.allowed_deviation)}，偏差 <span class="dev bad">${b.data.deviation > 0 ? "+" : ""}${fmtNum(b.data.deviation)}</span>，|偏差| ${fmtNum(b.data.abs_deviation)}<br>
+         <span class="muted">超限执行人 ${esc(b.data.failed_performer)} · ${esc(b.data.failed_at || "")}</span>`
+      : '<span class="muted">—</span>';
+    const recovery = b.data.reviewed_by
+      ? `复测 ${esc(b.data.retested_by)} 连续两次合格<br>复核 ${esc(b.data.reviewed_by)}<br><span class="muted">${esc(b.data.recovered_at || "")}</span>`
+      : '<span class="muted">—</span>';
+    const actions = b.status === "active"
+      ? `<button class="danger" onclick="suspend('${b.id}')">人工停用</button>`
+      : `<button onclick="review('${b.id}')">复核恢复</button>`;
+    return `<tr>
+      <td><strong>${esc(b.data.batch_no)}</strong></td>
+      <td>${instName(b.data.instrument_id)}<br>${methodName(b.data.method_id)}</td>
+      <td>${tag(b.status)}<br><span class="muted">建批 ${esc(b.created_at)}</span></td>
+      <td>${failure}</td>
+      <td>${recovery}</td>
+      <td class="actions">${actions}</td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">暂无批次</td></tr>';
+
+  const qSel = document.getElementById("qBatch");
+  const chosen = state.batches.find(b => b.id === qSel.value);
+  document.getElementById("qcHint").textContent = chosen
+    ? (chosen.status === "suspended" ? "批次已停用：仅可登记“停用后复测”" : "批次准入中：登记例行质控")
+    : "";
+  document.getElementById("qType").value = chosen && chosen.status === "suspended" ? "retest" : "routine";
+}
+
+function renderQcs() {
+  const rows = [...state.qcs].sort((a, b) => (a.data.performed_at < b.data.performed_at ? 1 : -1));
+  document.querySelector("#qcTable tbody").innerHTML = rows.map(q => {
+    const over = !q.data.within_tolerance;
+    return `<tr>
+      <td class="mono">${esc(q.data.performed_at)}</td>
+      <td>${batchNo(q.data.batch_id)}</td>
+      <td>${q.data.qc_type === "retest" ? "复测" : "例行"}</td>
+      <td>${fmtNum(q.data.standard_value)}</td>
+      <td>${fmtNum(q.data.measured_value)}</td>
+      <td>±${fmtNum(q.data.allowed_deviation)}</td>
+      <td class="dev ${over ? "bad" : "good"}">${q.data.deviation > 0 ? "+" : ""}${fmtNum(q.data.deviation)}</td>
+      <td>${tag(q.status)}</td>
+      <td>${esc(q.data.performed_by)}</td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="9" class="muted">暂无质控记录</td></tr>';
+}
+
+function renderResults() {
+  const tbody = document.querySelector("#resultTable tbody");
+  tbody.innerHTML = state.results.map(r => {
+    const value = r.data.value !== undefined ? `${fmtNum(r.data.value)} ${esc(r.data.unit || "")}` : '<span class="muted">未放行</span>';
+    const note = r.status === "returned"
+      ? `${esc(r.data.returned_reason || "")}<br>
+         <span class="muted">偏差 <span class="dev bad">${r.data.deviation > 0 ? "+" : ""}${fmtNum(r.data.deviation)}</span> / 允许 ±${fmtNum(r.data.allowed_deviation)} · 质控 ${esc((r.data.failed_qc_id || "").slice(0, 8))}</span>`
+      : (r.data.released_by ? `<span class="muted">放行 ${esc(r.data.released_by)}</span>` : '<span class="muted">—</span>');
+    const canRelease = (r.status === "pending" || r.status === "returned");
+    const action = canRelease
+      ? `<button class="primary" onclick="release('${r.id}')">${r.status === "returned" ? "按原记录重新放行" : "放行"}</button>`
+      : "";
+    return `<tr>
+      <td><strong>${esc(r.data.sample_id)}</strong></td>
+      <td>${batchNo(r.data.batch_id)}</td>
+      <td>${value}<div class="muted">${esc(r.data.measurement || "")}</div></td>
+      <td>${tag(r.status)}</td>
+      <td>${note}</td>
+      <td class="actions">${action}</td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">暂无结果</td></tr>';
+}
+
+function renderAudit(items) {
+  const rows = [...items].reverse().slice(0, 60);
+  document.querySelector("#auditTable tbody").innerHTML = rows.map(a => `<tr>
+    <td class="mono">${esc(a.created_at)}</td>
+    <td class="mono">${esc(a.entity_id.slice(0, 8))}</td>
+    <td>${esc(a.actor_id)} <span class="muted">(${esc(a.actor_role)})</span></td>
+    <td>${esc(a.action)}</td>
+    <td>${esc(a.from_status || "—")} → ${esc(a.to_status)}</td>
+    <td class="muted mono">${esc(JSON.stringify(a.detail))}</td>
+  </tr>`).join("");
+}
+
+async function createBatch() {
+  await call("/api/batches", "POST", {
+    batch_no: document.getElementById("bNo").value.trim(),
+    instrument_id: document.getElementById("bInst").value,
+    method_id: document.getElementById("bMethod").value,
+  });
+  toast("✓ 批次已建立，准入状态 active");
+  document.getElementById("bNo").value = "";
+  loadAll();
+}
+
+async function createQc() {
+  const payload = {
+    batch_id: document.getElementById("qBatch").value,
+    standard_value: parseFloat(document.getElementById("qStd").value),
+    measured_value: parseFloat(document.getElementById("qMeas").value),
+    allowed_deviation: parseFloat(document.getElementById("qTol").value),
+    performed_by: document.getElementById("qBy").value || document.getElementById("userId").value,
+    performed_at: (document.getElementById("qAt").value || "").replace("T", "T"),
+    qc_type: document.getElementById("qType").value,
+  };
+  const qc = await call("/api/qc_checks", "POST", payload);
+  if (qc.status === "failed") {
+    toast("✗ 质控超限：批次已停用，待放行结果已退回并列明偏差", true);
+  } else {
+    toast("✓ 质控合格（" + (payload.qc_type === "retest" ? "复测" : "例行") + "）");
+  }
+  document.getElementById("qStd").value = document.getElementById("qMeas").value = "";
+  loadAll();
+}
+
+async function suspend(id) {
+  const reason = prompt("停用原因：", "人工停用");
+  if (reason === null) return;
+  await call(`/api/entities/${id}/actions`, "POST", { action: "suspend", data: { reason } });
+  toast("✓ 批次已停用，待放行结果已退回");
+  loadAll();
+}
+
+async function review(id) {
+  try {
+    await call(`/api/entities/${id}/actions`, "POST", { action: "review_recovery", data: {} });
+    toast("✓ 复核通过，批次恢复准入；退回结果可按原记录重新放行");
+  } catch (e) { /* toast already shown */ }
+  loadAll();
+}
+
+async function createResult() {
+  await call("/api/results", "POST", {
+    sample_id: document.getElementById("rSample").value.trim(),
+    measurement: document.getElementById("rMeas").value,
+    batch_id: document.getElementById("rBatch").value,
+  });
+  toast("✓ 结果已登记（待放行）");
+  document.getElementById("rSample").value = document.getElementById("rMeas").value = "";
+  loadAll();
+}
+
+async function release(id) {
+  await call(`/api/entities/${id}/actions`, "POST", {
+    action: "release",
+    data: { value: parseFloat(document.getElementById("rValue").value), unit: document.getElementById("rUnit").value },
+  });
+  toast("✓ 已放行");
+  loadAll();
+}
+
+function nowLocal() {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 19);
+}
+
+document.getElementById("role").addEventListener("change", e => {
+  const map = { analyst: "analyst-a", authorizer: "qa-1", metrology: "met-1", technician: "tech-1", admin: "admin", viewer: "viewer-1" };
+  document.getElementById("userId").value = map[e.target.value];
+  loadAll();
+});
+document.getElementById("qBatch").addEventListener("change", renderBatches);
+document.getElementById("qAt").value = nowLocal();
+loadAll().catch(e => toast("加载失败：" + e.message, true));
 </script>
 </body>
 </html>

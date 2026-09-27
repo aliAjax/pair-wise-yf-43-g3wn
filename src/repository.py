@@ -6,7 +6,7 @@ from .domain import ConflictError, NotFoundError
 
 
 def utcnow():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class SQLiteRepository:
